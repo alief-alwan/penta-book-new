@@ -71,8 +71,8 @@
                         {% for book in books %}
                         <tr>
                             <td>
-                                {% if book['image'] %}
-                                <img src="{{ url_for('static', filename='uploads/' + book['image']) }}" alt="Book Cover" width="100">
+                                {% if book['img_url'] %}
+                                <img src="{{ url_for('static', filename='uploads/' ~ book['img_url']) }}" alt="Book Cover" width="100">
                                 {% else %}
                                 No Image
                                 {% endif %}

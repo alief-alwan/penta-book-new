@@ -15,7 +15,7 @@
     <!-- Form Card -->
     <div class="card">
         <div class="card-body">
-            <form method="POST" class="needs-validation" novalidate>
+            <form method="post" action="{{ url_for('edit_book', book_id=book_id) }}" enctype="multipart/form-data">
                 
                 <div class="row">
                     <!-- Left Column - Book Details -->

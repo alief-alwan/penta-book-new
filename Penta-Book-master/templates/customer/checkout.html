@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+{% extends "customer/base.html" %}
 
 {% block title %}
     Checkout - Penta Book
@@ -6,7 +6,7 @@
 
 {% block content %}
     <h1>Checkout</h1>
-    
+
     <table class="table">
         <thead>
             <tr>
@@ -29,13 +29,23 @@
             {% endfor %}
         </tbody>
     </table>
-    
-    <h2>Total: {{ format_currency(total) }}</h2>
-    
-    <form method="POST">
+
+    <h2>Subtotal: {{ format_currency(total) }}</h2>
+    <h2>Platform Fee: {{ format_currency(platform_fee) }}</h2>
+    <h2>Total: {{ format_currency(total_with_fee) }}</h2>
+
+    <form method="POST" action="{{ url_for('checkout') }}">
         <div class="form-group">
             <label for="address">Delivery Address</label>
             <input type="text" id="address" name="address" class="form-control" required>
+        </div>
+        <div class="form-group">
+            <label for="payment_method">Payment Method</label>
+            <select id="payment_method" name="payment_method" class="form-control" required>
+                {% for method in payment_methods %}
+                <option value="{{ method.method_id }}">{{ method.method_name }}</option>
+                {% endfor %}
+            </select>
         </div>
         <button type="submit" class="btn btn-primary">Place Order</button>
     </form>

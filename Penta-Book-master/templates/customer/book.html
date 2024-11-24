@@ -7,12 +7,22 @@
 {% block content %}
     <div class="book-detail mt-5">
         <h1>{{ book.book_name }}</h1>
+
+        <!-- Check if img_url is provided -->
+        {% if book.img_url %}
+            <img src="{{ url_for('static', filename='uploads/' + book.img_url) }}" alt="Book Cover" width="300">
+        {% else %}
+            <p>No image available</p>
+        {% endif %}
+
         <p><strong>Author:</strong> {{ book.author }}</p>
         <p><strong>Description:</strong> {{ book.desc }}</p>
         <p><strong>Price:</strong> {{ format_currency(book.price) }}</p>
 
-        {% if book.category_id %}
-        <p><strong>Category ID:</strong> {{ book.category_id }}</p>
+        {% if category_name %}
+            <p><strong>Category:</strong> {{ category_name }}</p>
+        {% else %}
+            <p><strong>Category:</strong> No category</p>
         {% endif %}
 
         <!-- Add to Cart Form -->

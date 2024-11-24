@@ -1,7 +1,7 @@
 from flask_wtf import FlaskForm
 from wtforms import StringField, PasswordField, SubmitField, TextAreaField, FloatField, IntegerField, SelectField, FileField
 from wtforms.validators import DataRequired, Email, Length, EqualTo, NumberRange
-from flask_wtf.file import FileField, FileAllowed
+from flask_wtf.file import FileAllowed
 
 
 
@@ -49,3 +49,12 @@ class BookForm(FlaskForm):
     category_id = SelectField('Category', coerce=int, validators=[DataRequired()])
     image = FileField('Book Cover Image', validators=[FileAllowed(['jpg', 'png', 'jpeg'], 'Images only!')])
     submit = SubmitField('Save')
+
+class ShopUpdateForm(FlaskForm):
+    shop_name = StringField('Shop Name', validators=[DataRequired()])
+    owner_name = StringField('Owner Name', validators=[DataRequired()])
+    shop_phone = StringField('Phone Number', validators=[DataRequired()])
+    shop_address = StringField('Address', validators=[DataRequired()])
+    shop_email = StringField('Email', validators=[DataRequired(), Email()])
+    shop_description = StringField('Description')
+    submit = SubmitField('Update')

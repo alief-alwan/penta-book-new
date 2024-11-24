@@ -1,9 +1,10 @@
 from flask import Flask, render_template, request, redirect, url_for, g, flash, session
 import sqlite3
 import requests
+import json
 from werkzeug.security import generate_password_hash, check_password_hash
 from config import Config
-from forms import LoginForm, RegisterForm, ShopRegisterForm, BookForm
+from forms import LoginForm, RegisterForm, ShopRegisterForm, BookForm, ShopUpdateForm
 import os
 from werkzeug.utils import secure_filename
 
@@ -102,11 +103,16 @@ def admin_delete(user_type, user_id):
     flash(f'{user_type.capitalize()} deleted successfully.', 'success')
     return redirect(url_for('admin_dashboard'))
 
-@app.route('/buyer_index', methods=['Get'])
+@app.route('/buyer_index', methods=['GET'])
 def buyer_index():
+    if 'user_id' not in session:
+        flash('You need to be logged in to access the buyer index.', 'warning')
+        return redirect(url_for('login'))
+
     db = get_db()
     books = db.execute('SELECT * FROM books').fetchall()
     return render_template('customer/buyer_index.html', books=books, format_currency=format_currency)
+
 
 @app.route('/shop/order', methods=['Get'])
 def shop_order():
@@ -211,10 +217,10 @@ def shop_login():
             session['shop_id'] = shop['shop_id']
             session['shop_name'] = shop['shop_name']
             session['role'] = 'shop'
-            # if not is_shop_verified(shop['shop_id']):
-            #     session['verification_message'] = 'Your shop is not verified. Please contact admin.'
-            #     return redirect(url_for('logout'))
-            # flash('Login successful!', 'success')
+            if not is_shop_verified(shop['shop_id']):
+                session['verification_message'] = 'Your shop is not verified. Please contact admin.'
+                return redirect(url_for('logout'))
+            flash('Login successful!', 'success')
             return redirect(url_for('manage_books'))
         else:
             flash('Invalid shop name or password.', 'danger')
@@ -258,16 +264,15 @@ def edit_profile(shop_id):
     if session.get('role') != 'shop':
         flash('You need to be logged in as a shop to access this page.', 'warning')
         return redirect(url_for('shop_login'))
-    
+
     db = get_db()
-    form = ShopRegisterForm()
-    shop_id = session.get('shop_id')
+    form = ShopUpdateForm()
 
     # Fetch current shop data
     shop_data = db.execute('SELECT * FROM shop WHERE shop_id = ?', (shop_id,)).fetchone()
 
-    if not shop_data:
-        flash('Shop data not found!', 'danger')
+    if not shop_data or shop_data['shop_id'] != session.get('shop_id'):
+        flash('Shop data not found or you do not have permission to edit this profile.', 'danger')
         return redirect(url_for('profile'))
 
     if request.method == 'GET':
@@ -280,20 +285,20 @@ def edit_profile(shop_id):
         form.shop_description.data = shop_data['shop_description']
 
     if form.validate_on_submit():
-        # Update shop data in the database
+        shop_name = form.shop_name.data
+        owner_name = form.owner_name.data
+        shop_phone = form.shop_phone.data
+        shop_address = form.shop_address.data
+        shop_email = form.shop_email.data
+        shop_description = form.shop_description.data
+
         try:
             db.execute('''
                 UPDATE shop
                 SET shop_name = ?, owner_name = ?, shop_phone = ?, shop_address = ?, shop_email = ?, shop_description = ?
                 WHERE shop_id = ?
             ''', (
-                form.shop_name.data,
-                form.owner_name.data,
-                form.shop_phone.data,
-                form.shop_address.data,
-                form.shop_email.data,
-                form.shop_description.data,
-                shop_id,
+                shop_name, owner_name, shop_phone, shop_address, shop_email, shop_description, shop_id
             ))
             db.commit()
             flash('Shop profile updated successfully!', 'success')
@@ -301,7 +306,7 @@ def edit_profile(shop_id):
         except Exception as e:
             flash(f'An error occurred: {e}', 'danger')
 
-    return render_template('shop/edit_profile.html', form=form)
+    return render_template('shop/edit_profile.html', form=form, shop_id=shop_id)
 
 
 @app.route('/logout')
@@ -309,7 +314,7 @@ def logout():
     verification_message = session.pop('verification_message', None)
     session.clear()
     if verification_message:
-        flash(verification_message, 'danger')
+        flash('verification_message', 'danger')
     else:
         flash('You have been logged out.', 'success')
     return redirect(url_for('index'))
@@ -321,10 +326,17 @@ def book(book_id):
         db = get_db()
         cur = db.execute('SELECT * FROM books WHERE book_id = ?', (book_id,))
         book = cur.fetchone()
-        return render_template('customer/book.html', book=book, format_currency=format_currency)
+        category_name = None
+        if book and book['category_id']:
+            cur = db.execute('SELECT category_name FROM categories WHERE category_id = ?', (book['category_id'],))
+            category = cur.fetchone()
+            category_name = category['category_name'] if category else "No category"
+        return render_template('customer/book.html', book=book, category_name=category_name,
+                               format_currency=format_currency)
     except Exception as e:
         flash(f'An error occurred: {e}', 'danger')
         return redirect(url_for('index'))
+
 
 
 @app.route('/add_to_cart/<int:book_id>', methods=['POST'])
@@ -337,67 +349,44 @@ def add_to_cart(book_id):
         db = get_db()
         cur = db.execute('SELECT * FROM books WHERE book_id = ?', (book_id,))
         book = cur.fetchone()
+
         if book:
+            # Check if there is an existing open cart for the user
+            cart_cur = db.execute('SELECT cart_id FROM cart WHERE buyer_id = ? AND status = ?',
+                                  (session['user_id'], 'open'))
+            cart_id = cart_cur.fetchone()
+
+            # If no open cart exists, create a new one
+            if not cart_id:
+                db.execute('INSERT INTO cart (buyer_id, status) VALUES (?, ?)',
+                           (session['user_id'], 'open'))
+                cart_id = db.execute('SELECT cart_id FROM cart WHERE buyer_id = ? AND status = ?',
+                                     (session['user_id'], 'open')).fetchone()
+
+            # Check if the book is already in the cart
             cur = db.execute(
-                'SELECT * FROM cartitems WHERE cart_id = (SELECT cart_id FROM cart WHERE buyer_id = ?) AND book_id = ?',
-                (session['user_id'], book_id))
+                'SELECT * FROM cartitems WHERE cart_id = ? AND book_id = ?',
+                (cart_id['cart_id'], book_id)
+            )
             item = cur.fetchone()
+
             if item:
                 db.execute('UPDATE cartitems SET quantity = quantity + 1 WHERE cart_item_id = ?',
                            (item['cart_item_id'],))
             else:
-                cart_cur = db.execute('SELECT cart_id FROM cart WHERE buyer_id = ?', (session['user_id'],))
-                cart_id = cart_cur.fetchone()
-                if not cart_id:
-                    db.execute('INSERT INTO cart (buyer_id, status) VALUES (?, ?)', (session['user_id'], 'open'))
-                    cart_id = db.execute('SELECT cart_id FROM cart WHERE buyer_id = ?',
-                                         (session['user_id'],)).fetchone()
                 db.execute('INSERT INTO cartitems (cart_id, book_id, quantity) VALUES (?, ?, ?)',
                            (cart_id['cart_id'], book_id, 1))
+
             db.commit()
             flash('Book added to cart!', 'success')
-        return redirect(url_for('index'))
+        else:
+            flash('Book not found.', 'danger')
+
+        return redirect(url_for('buyer_index'))
     except Exception as e:
         flash(f'An error occurred: {e}', 'danger')
-        return redirect(url_for('index'))
+        return redirect(url_for('buyer_index'))
 
-
-@app.route('/shop_books', methods=['GET'])
-def shop_books():
-    query = request.args.get('query', '')
-    genre = request.args.get('genre', '')
-    price_min = request.args.get('price_min', 0)
-    price_max = request.args.get('price_max', float('inf'))
-    sort = request.args.get('sort', 'book_name')
-
-    db = get_db()
-    cursor = db.cursor()
-
-    sql_query = "SELECT * FROM books WHERE 1=1"
-    parameters = []
-
-    if query:
-        sql_query += " AND (book_name LIKE ? OR author LIKE ?)"
-        parameters.extend(['%' + query + '%', '%' + query + '%'])
-
-    if genre:
-        sql_query += " AND genre = ?"
-        parameters.append(genre)
-
-    sql_query += " AND price BETWEEN ? AND ?"
-    parameters.extend([price_min, price_max])
-
-    if sort == 'price_asc':
-        sql_query += " ORDER BY price ASC"
-    elif sort == 'price_desc':
-        sql_query += " ORDER BY price DESC"
-    else:
-        sql_query += f" ORDER BY {sort}"
-
-    cursor.execute(sql_query, parameters)
-    books = cursor.fetchall()
-
-    return render_template('shop/shop_books.html', books=books, format_currency=format_currency)
 
 
 @app.route('/cart')
@@ -421,7 +410,24 @@ def cart():
         flash(f'An error occurred: {e}', 'danger')
         return redirect(url_for('index'))
 
+@app.route('/clear_cart', methods=['POST'])
+def clear_cart():
+    if 'user_id' not in session:
+        flash('You need to be logged in to clear your cart.', 'warning')
+        return redirect(url_for('login'))
 
+    try:
+        db = get_db()
+        db.execute('''
+            DELETE FROM cartitems
+            WHERE cart_id = (SELECT cart_id FROM cart WHERE buyer_id = ? AND status = "open")
+        ''', (session['user_id'],))
+        db.commit()
+        flash('Your cart has been cleared.', 'success')
+    except Exception as e:
+        flash(f'An error occurred while clearing your cart: {e}', 'danger')
+
+    return redirect(url_for('cart'))
 
 @app.route('/checkout', methods=['GET', 'POST'])
 def checkout():
@@ -435,40 +441,104 @@ def checkout():
 
         # Get the cart items
         cur = db.execute('''
-            SELECT b.book_name, b.desc, b.price, c.quantity, b.book_id, sh.shop_id, sh.price as individual_price, 
-                            (c.quantity * b.price) as total_price, sh.shop_email, sh.shop_name, sh.owner_name
+            SELECT b.book_name, b.desc, b.price, c.quantity, b.book_id, sh.shop_id, b.price as individual_price, 
+                            (c.quantity * b.price) as total_price, sh.shop_email, sh.shop_name, sh.owner_name,
+                            c.cart_id
             FROM cartitems c
             JOIN books b ON c.book_id = b.book_id
             JOIN shop sh ON sh.shop_id = b.shop_id
-            WHERE c.cart_id = (SELECT cart_id FROM cart WHERE buyer_id = ?)
-        ''', (user_id,))
+            WHERE c.cart_id = (SELECT cart_id FROM cart WHERE buyer_id = ? AND status = ?)
+        ''', (user_id, 'open'))
         cart_items = cur.fetchall()
+
+        if not cart_items:
+            flash('Your cart is empty.', 'warning')
+            return redirect(url_for('index'))
+
+        # Get the payment methods
+        cur = db.execute('SELECT method_id, method_name FROM paymentmethods')
+        payment_methods = cur.fetchall()
 
         if request.method == 'POST':
             # Create a new order
             total_price = sum(item['price'] * item['quantity'] for item in cart_items)
             address = request.form.get('address')  # Collect delivery address
-            db.execute(
+
+            cur = db.cursor()  # Use a cursor object to execute the insert command
+
+            # Retrieve the cart_id from the cart_items
+            cart_id = cart_items[0]['cart_id'] if cart_items else 0
+
+            # Calculate the platform fee
+            platform_fee = total_price * 0.05
+            total_price_with_fee = total_price + platform_fee
+
+            cur.execute(
                 'INSERT INTO orders (cart_id, buyer_id, subtotal, total, status, delivery_address, order_date) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)',
-                (cart_items[0][0] if cart_items else 0, user_id, total_price, total_price, 'initiated', address))
-            order_id = db.lastrowid
+                (cart_id, user_id, total_price, total_price_with_fee, 'initiated', address))
+            order_id = cur.lastrowid  # Get the ID of the new order
 
             for item in cart_items:
-                db.execute(
+                cur.execute(
                     'INSERT INTO orderitems (order_id, book_id, shop_id, quantity, price, total_price) VALUES (?, ?, ?, ?, ?, ?)',
                     (order_id, item['book_id'], item['shop_id'], item['quantity'], item['individual_price'],
                      item['total_price']))
 
-            db.execute('UPDATE cart SET status = ? WHERE buyer_id = ?', ('complete', user_id))
             db.commit()
-            flash('Your order has been placed.', 'success')
-            return redirect(url_for('index'))
+
+            # Update cart status
+            cur.execute('UPDATE cart SET status = ? WHERE cart_id = ?', ('completed', cart_id))
+            db.commit()
+            cur.close()  # Close the cursor
+
+            flash('Your order has been placed successfully. Please proceed with the payment.', 'success')
+            return redirect(url_for('payment', order_id=order_id))
 
         total = sum(item['price'] * item['quantity'] for item in cart_items)
-        return render_template('customer/checkout.html', cart=cart_items, total=total, format_currency=format_currency)
+        platform_fee = total * 0.05
+        total_with_fee = total + platform_fee
+
+        return render_template('customer/checkout.html', cart=cart_items, total=total, platform_fee=platform_fee,
+                               total_with_fee=total_with_fee, payment_methods=payment_methods,
+                               format_currency=format_currency)
+
+    except sqlite3.Error as e:
+        app.logger.error('Database error occurred: %s', e)
+        flash('An error occurred while processing your request. Please try again.', 'danger')
     except Exception as e:
-        flash(f'An error occurred: {e}', 'danger')
-        return redirect(url_for('index'))
+        app.logger.error('Error occurred: %s', e)
+        flash('An unexpected error occurred. Please try again.', 'danger')
+    return redirect(url_for('index'))
+
+
+
+
+
+def process_payment(order_id, method_id, amount):
+    payment_url = "http://127.0.0.1:5001/process_payment"
+    payload = json.dumps({
+        "method_id": method_id,
+        "order_id": order_id,
+        "amount": amount
+    })
+    headers = {
+        'Content-Type': 'application/json'
+    }
+    response = requests.post(payment_url, headers=headers, data=payload)
+    return response.json()
+
+
+def create_shipment(order_id, address):
+    shipment_url = "http://127.0.0.1:5002/create_shipment"
+    payload = json.dumps({
+        "order_id": order_id,
+        "address": address
+    })
+    headers = {
+        'Content-Type': 'application/json'
+    }
+    response = requests.post(shipment_url, headers=headers, data=payload)
+    return response.json()
 
 
 @app.route('/payment/<int:order_id>', methods=['GET', 'POST'])
@@ -478,45 +548,55 @@ def payment(order_id):
         return redirect(url_for('login'))
 
     db = get_db()
+
+    # Fetch order details
+    order = db.execute('SELECT * FROM orders WHERE order_id = ?', (order_id,)).fetchone()
+
     if request.method == 'POST':
         method_id = request.form.get('method')
-        transaction_id = request.form.get('transaction_id')
 
-        # Fetch order details
-        order = db.execute('SELECT * FROM orders WHERE order_id = ?', (order_id,)).fetchone()
+        # Retrieve method_name for method_id
+        method_name = db.execute('SELECT method_name FROM paymentmethods WHERE method_id = ?', (method_id,)).fetchone()[
+            'method_name']
 
-        # Call mock payment gateway
+        # Define payment gateway API URL
         payment_url = 'http://localhost:5001/process_payment'
         data = {
             "amount": order['total'],
             "method_id": method_id,
+            "method_name": method_name,
             "order_id": order_id
         }
 
         try:
             response = requests.post(payment_url, json=data)
-            response_data = response.json()
-            if response.status_code == 200 and response_data['status'] == 'success':
-                transaction_id = response_data['data']['transaction_id']
-                payment_status = response_data['data']['payment_status']
+            try:
+                response_data = response.json()
+                if response.status_code == 200 and response_data['status'] == 'success':
+                    transaction_id = response_data['data']['transaction_id']
+                    payment_status = response_data['data']['payment_status']
+                    payment_total = order['total']  # Retrieve payment total from order
 
-                # Insert payment details
-                db.execute(
-                    'INSERT INTO payments (method_id, order_id, transaction_id, payment_date, payment_status) VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?)',
-                    (method_id, order_id, transaction_id, payment_status))
-                db.execute('UPDATE orders SET status = ? WHERE order_id = ?', ('paid', order_id))
-                db.commit()
-                flash('Payment successful!', 'success')
-            else:
-                flash('Payment declined by the gateway.', 'danger')
+                    # Insert payment details
+                    db.execute(
+                        'INSERT INTO payments (method_id, order_id, transaction_id, payment_date, payment_status, payment_total) VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?)',
+                        (method_id, order_id, transaction_id, payment_status, payment_total))
+                    db.execute('UPDATE orders SET status = ? WHERE order_id = ?', ('paid', order_id))
+                    db.commit()
+                    flash('Payment successful!', 'success')
+                else:
+                    flash('Payment declined by the gateway.', 'danger')
+            except requests.exceptions.JSONDecodeError:
+                flash('Payment gateway returned an invalid response.', 'danger')
         except requests.ConnectionError:
             flash('Failed to connect to the payment gateway.', 'danger')
 
-        return redirect(url_for('index'))
+        return redirect(url_for('buyer_index'))
 
     # Fetch available payment methods
     methods = db.execute('SELECT * FROM paymentmethods').fetchall()
-    return render_template('customer/payment.html', methods=methods)
+    return render_template('customer/payment.html', order=order, methods=methods, format_currency=format_currency)
+
 
 @app.route('/shop/manage_books', methods=['GET', 'POST'])
 def manage_books():
@@ -606,14 +686,19 @@ def edit_book(book_id):
         price = form.price.data
         stock = form.stock.data
         category_id = form.category_id.data
-        image_file = save_image(form.image.data)
+
+        # Check if a new image file is uploaded
+        if form.image.data:
+            image_file = save_image(form.image.data)
+        else:
+            image_file = book['img_url']
 
         try:
             db.execute('''
                 UPDATE books 
-                SET category_id = ?, book_name = ?, isbn = ?, author = ?, desc = ?, price = ?, stock = ? 
+                SET category_id = ?, book_name = ?, isbn = ?, author = ?, desc = ?, price = ?, stock = ?, img_url = ? 
                 WHERE book_id = ? AND shop_id = ?
-            ''', (category_id, book_name, isbn, author, desc, price, stock, book_id, session['shop_id']))
+            ''', (category_id, book_name, isbn, author, desc, price, stock, image_file, book_id, session['shop_id']))
             db.commit()
             flash('Book updated successfully!', 'success')
             return redirect(url_for('manage_books'))
@@ -628,7 +713,9 @@ def edit_book(book_id):
     form.stock.data = book['stock']
     form.category_id.data = book['category_id']
 
-    return render_template('shop/edit_book.html', form=form)
+    return render_template('shop/edit_book.html', form=form, book_id=book_id)
+
+
 
 
 @app.route('/shop/delete_book/<int:book_id>', methods=['POST'])
